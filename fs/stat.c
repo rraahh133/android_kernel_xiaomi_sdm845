@@ -22,6 +22,18 @@
 #include <linux/susfs.h>
 #endif
 
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_def.h>
+
+extern bool susfs_is_inode_sus_kstat(
+	struct inode *inode, bool *out_is_fuse);
+
+extern void susfs_sus_kstat_spoof_generic_fillattr(
+	struct inode *inode,
+	struct kstat *stat,
+	u32 result_mask);
+#endif
+
 void generic_fillattr(struct inode *inode, struct kstat *stat)
 {
 	stat->dev = inode->i_sb->s_dev;
@@ -57,10 +69,48 @@ int vfs_getattr_nosec(struct path *path, struct kstat *stat)
 {
 	struct inode *inode = d_backing_inode(path->dentry);
 
-	if (inode->i_op->getattr)
-		return inode->i_op->getattr(path->mnt, path->dentry, stat);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	bool is_fuse = false;
+	bool sus_kstat = false;
+
+	if (susfs_is_current_app_uid())
+		sus_kstat = susfs_is_inode_sus_kstat(
+			inode, &is_fuse);
+#endif
+
+	if (inode->i_op->getattr) {
+		int err;
+
+		err = inode->i_op->getattr(
+			path->mnt, path->dentry, stat);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		if (!err && sus_kstat) {
+			susfs_sus_kstat_spoof_generic_fillattr(
+				inode,
+				stat,
+				is_fuse ?
+					STATX_SUS_KSTAT_FUSE :
+					STATX_SUS_KSTAT);
+		}
+#endif
+
+		return err;
+	}
 
 	generic_fillattr(inode, stat);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	if (sus_kstat) {
+		susfs_sus_kstat_spoof_generic_fillattr(
+			inode,
+			stat,
+			is_fuse ?
+				STATX_SUS_KSTAT_FUSE :
+				STATX_SUS_KSTAT);
+	}
+#endif
+
 	return 0;
 }
 
@@ -270,9 +320,6 @@ static int cp_new_stat(struct kstat *stat, struct stat __user *statbuf)
 #endif
 	tmp.st_blocks = stat->blocks;
 	tmp.st_blksize = stat->blksize;
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-	susfs_sus_kstat(tmp.st_ino, &tmp);
-#endif
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
@@ -300,7 +347,7 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
 	return cp_new_stat(&stat, statbuf);
 }
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#ifdef CONFIG_KSU
 __attribute__((hot))
 extern int ksu_handle_stat(int *dfd,
                            const char __user **filename_user,
@@ -325,7 +372,7 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 	int error;
 
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#ifdef CONFIG_KSU
     ksu_handle_stat(&dfd, &filename, &flag);
 #endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
@@ -479,7 +526,7 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
 	int error;
 
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#ifdef CONFIG_KSU
     ksu_handle_stat(&dfd, &filename, &flag);
 #endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
